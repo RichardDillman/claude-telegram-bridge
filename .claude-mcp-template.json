@@ -1,0 +1,14 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schema/mcp.json",
+  "mcpServers": {
+    "telegram": {
+      "command": "node",
+      "args": [
+        "/REPLACE/WITH/ABSOLUTE/PATH/TO/claude-telegram-bridge/dist/mcp-server.js"
+      ],
+      "env": {
+        "TELEGRAM_BRIDGE_URL": "http://localhost:3456"
+      }
+    }
+  }
+}

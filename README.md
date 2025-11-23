@@ -26,6 +26,19 @@ After trying email, SMS, and Google Chat integrations, Telegram emerged as the b
 - 🔔 **Priority Notifications** - Different icons for info, success, warning, error, question
 - 🌐 **HTTP API** - Easy integration from any app/project
 - 🚀 **Background Service** - Runs independently, always available
+- 🔧 **MCP Protocol** - Works as a standard MCP server in any Claude project
+
+## Using in Other Projects
+
+**Already have the bridge installed?** Just add this to your project's `.claude/mcp.json`:
+
+```bash
+# Quick command to get your config
+cd /path/to/claude-telegram-bridge
+./scripts/get-mcp-config.sh > ../your-project/.claude/mcp.json
+```
+
+Or manually copy the MCP config - see [SETUP-FOR-OTHER-PROJECTS.md](SETUP-FOR-OTHER-PROJECTS.md)
 
 ## Quick Start
 
@@ -89,6 +102,17 @@ pnpm daemon
 
 ### 5. Add MCP Server to Claude
 
+#### Option A: Auto-Generate Config (Easiest)
+
+```bash
+cd claude-telegram-bridge
+./scripts/get-mcp-config.sh
+```
+
+Copy the output to your MCP config file.
+
+#### Option B: Manual Setup
+
 Add to your Claude Code MCP settings (`~/.config/claude-code/settings/mcp.json`):
 
 ```json
@@ -107,14 +131,17 @@ Add to your Claude Code MCP settings (`~/.config/claude-code/settings/mcp.json`)
 }
 ```
 
-**Replace `/ABSOLUTE/PATH/TO/` with your actual path!**
-
-To find your absolute path:
+**Find your path:**
 ```bash
-cd claude-telegram-bridge
-pwd
-# Copy the output and use: <output>/dist/mcp-server.js
+cd claude-telegram-bridge && pwd
+# Use output: <result>/dist/mcp-server.js
 ```
+
+#### MCP Config Locations
+
+- **Global (all projects):** `~/.config/claude-code/settings/mcp.json`
+- **Per-project:** `your-project/.claude/mcp.json`
+- **VS Code:** `your-project/.vscode/mcp.json`
 
 ### 6. Available Tools
 
@@ -124,6 +151,13 @@ Once configured, Claude can automatically use:
 - `telegram_get_messages` - Check for messages from you
 - `telegram_reply` - Reply to your messages
 - `telegram_check_health` - Check bridge status
+
+**View detailed tool info:**
+```bash
+pnpm tools
+# or
+node scripts/list-tools.js
+```
 
 ### 7. Test It
 

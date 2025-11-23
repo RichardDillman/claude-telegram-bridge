@@ -14,7 +14,9 @@
     "start": "node dist/index.js",
     "daemon": "pm2 start dist/index.js --name claude-telegram",
     "stop": "pm2 stop claude-telegram",
-    "logs": "pm2 logs claude-telegram"
+    "logs": "pm2 logs claude-telegram",
+    "tools": "node scripts/list-tools.js",
+    "config": "bash scripts/get-mcp-config.sh"
   },
   "keywords": [
     "telegram",
