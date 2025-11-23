@@ -10,6 +10,19 @@ import {
   getQueueSummary,
   cleanupOldTasks
 } from './queue-manager.js';
+import {
+  spawnClaude,
+  killClaude,
+  listSpawnedProcesses,
+  isClaudeRunning
+} from './claude-spawner.js';
+import {
+  registerProject,
+  unregisterProject,
+  findProject,
+  loadProjects,
+  validateProjectPath
+} from './project-registry.js';
 
 dotenv.config();
 
@@ -109,23 +122,25 @@ bot.command('status', async (ctx) => {
 bot.command('help', async (ctx) => {
   await ctx.reply(
     '*Claude Telegram Bridge - Commands*\n\n' +
-    '*Bot Commands:*\n' +
-    '`/start` - Initialize and connect\n' +
-    '`/help` - Show this help message\n' +
-    '`/status` - Check bridge status\n' +
+    '*Session Management:*\n' +
     '`/sessions` - List active Claude sessions\n' +
+    '`/queue` - View queued messages\n\n' +
+    '*Project Management:*\n' +
+    '`/projects` - List registered projects\n' +
+    '`/register` ProjectName /path [--auto-spawn]\n' +
+    '`/unregister` ProjectName\n' +
+    '`/spawn` ProjectName [prompt]\n' +
+    '`/spawned` - List spawned processes\n' +
+    '`/kill` ProjectName\n\n' +
+    '*Bot Control:*\n' +
+    '`/status` - Check bridge status\n' +
     '`/test` - Send test notification\n\n' +
     '*How it works:*\n' +
-    '• Send me any message - I forward it to Claude\n' +
-    '• Claude processes it and replies back\n' +
-    '• When Claude asks a question, your next message answers it\n' +
-    '• Messages show project context: 📁 ProjectName [#abc1234]\n\n' +
-    '*Features:*\n' +
-    '✅ Multi-project session tracking\n' +
-    '✅ Two-way communication\n' +
-    '✅ Question/Answer flow\n' +
-    '✅ Progress notifications\n' +
-    '✅ Error alerts\n\n' +
+    '• Send any message - forwards to active Claude\n' +
+    '• Target specific project: `ProjectName: message`\n' +
+    '• Messages show context: 📁 ProjectName [#abc1234]\n' +
+    '• Register projects for remote spawning\n' +
+    '• Messages queue when projects are offline\n\n' +
     'More info: See README in bridge folder',
     { parse_mode: 'Markdown' }
   );
@@ -171,6 +186,178 @@ bot.command('queue', async (ctx) => {
 
     await ctx.reply(
       `*Queued Messages* (${summary.length} projects)\n\n${queueList}`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (error: any) {
+    await ctx.reply(`❌ Error: ${error.message}`);
+  }
+});
+
+bot.command('projects', async (ctx) => {
+  try {
+    const projects = await loadProjects();
+
+    if (projects.length === 0) {
+      await ctx.reply('📭 No registered projects\n\nRegister with: `/register ProjectName /path/to/project`', { parse_mode: 'Markdown' });
+      return;
+    }
+
+    const projectList = projects.map((p, i) => {
+      const autoSpawnEmoji = p.autoSpawn ? '🔄' : '⏸️';
+      const lastAccessed = new Date(p.lastAccessed).toLocaleDateString();
+      const running = isClaudeRunning(p.name) ? '🟢' : '⚪';
+      return `${i + 1}. ${running} *${p.name}* ${autoSpawnEmoji}\n   📍 ${p.path}\n   🕐 Last: ${lastAccessed}`;
+    }).join('\n\n');
+
+    await ctx.reply(
+      `*Registered Projects* (${projects.length})\n\n${projectList}\n\n🟢 Running  ⚪ Offline  🔄 Auto-spawn  ⏸️ Manual`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (error: any) {
+    await ctx.reply(`❌ Error: ${error.message}`);
+  }
+});
+
+bot.command('register', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+
+  if (args.length < 2) {
+    await ctx.reply(
+      '📝 *Register a Project*\n\n' +
+      'Usage: `/register ProjectName /path/to/project [--auto-spawn]`\n\n' +
+      'Example: `/register MyApp ~/code/myapp --auto-spawn`\n\n' +
+      'Options:\n' +
+      '• `--auto-spawn`: Auto-start Claude when messages arrive',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const projectName = args[0];
+  const projectPath = args[1].replace('~', process.env.HOME || '~');
+  const autoSpawn = args.includes('--auto-spawn');
+
+  try {
+    // Validate path exists
+    const isValid = await validateProjectPath(projectPath);
+    if (!isValid) {
+      await ctx.reply(`❌ Path does not exist or is not a directory: ${projectPath}`);
+      return;
+    }
+
+    await registerProject(projectName, projectPath, { autoSpawn });
+    await ctx.reply(
+      `✅ Project registered successfully!\n\n` +
+      `📁 *${projectName}*\n` +
+      `📍 ${projectPath}\n` +
+      `${autoSpawn ? '🔄 Auto-spawn enabled' : '⏸️ Manual spawn only'}\n\n` +
+      `Spawn with: \`/spawn ${projectName}\``,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (error: any) {
+    await ctx.reply(`❌ Registration failed: ${error.message}`);
+  }
+});
+
+bot.command('unregister', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+
+  if (args.length === 0) {
+    await ctx.reply('Usage: `/unregister ProjectName`', { parse_mode: 'Markdown' });
+    return;
+  }
+
+  const projectName = args[0];
+
+  try {
+    const success = await unregisterProject(projectName);
+    if (success) {
+      await ctx.reply(`✅ Project *${projectName}* unregistered`, { parse_mode: 'Markdown' });
+    } else {
+      await ctx.reply(`❌ Project *${projectName}* not found`, { parse_mode: 'Markdown' });
+    }
+  } catch (error: any) {
+    await ctx.reply(`❌ Error: ${error.message}`);
+  }
+});
+
+bot.command('spawn', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+
+  if (args.length === 0) {
+    await ctx.reply(
+      '🚀 *Spawn Claude in a Project*\n\n' +
+      'Usage: `/spawn ProjectName [prompt]`\n\n' +
+      'Example:\n' +
+      '`/spawn MyApp`\n' +
+      '`/spawn MyApp "Fix the login bug"`',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const projectName = args[0];
+  const initialPrompt = args.slice(1).join(' ') || undefined;
+
+  try {
+    await ctx.reply(`⏳ Starting Claude in *${projectName}*...`, { parse_mode: 'Markdown' });
+
+    const result = await spawnClaude(projectName, initialPrompt);
+
+    if (result.success) {
+      await ctx.reply(
+        `${result.message}\n\n` +
+        `PID: ${result.pid}\n\n` +
+        `You can now send messages to it: \`${projectName}: your message\``,
+        { parse_mode: 'Markdown' }
+      );
+    } else {
+      await ctx.reply(`❌ ${result.message}`);
+    }
+  } catch (error: any) {
+    await ctx.reply(`❌ Spawn failed: ${error.message}`);
+  }
+});
+
+bot.command('kill', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+
+  if (args.length === 0) {
+    await ctx.reply('Usage: `/kill ProjectName`', { parse_mode: 'Markdown' });
+    return;
+  }
+
+  const projectName = args[0];
+
+  try {
+    const result = killClaude(projectName);
+
+    if (result.success) {
+      await ctx.reply(`🛑 ${result.message}`);
+    } else {
+      await ctx.reply(`❌ ${result.message}`);
+    }
+  } catch (error: any) {
+    await ctx.reply(`❌ Error: ${error.message}`);
+  }
+});
+
+bot.command('spawned', async (ctx) => {
+  try {
+    const spawned = listSpawnedProcesses();
+
+    if (spawned.length === 0) {
+      await ctx.reply('📭 No spawned Claude processes');
+      return;
+    }
+
+    const spawnedList = spawned.map((s, i) => {
+      const prompt = s.initialPrompt ? `\n   💬 "${s.initialPrompt.substring(0, 50)}${s.initialPrompt.length > 50 ? '...' : ''}"` : '';
+      return `${i + 1}. *${s.projectName}*\n   🆔 PID: ${s.pid}\n   ⏱️  Running: ${s.runningMinutes}m${prompt}`;
+    }).join('\n\n');
+
+    await ctx.reply(
+      `*Spawned Claude Processes* (${spawned.length})\n\n${spawnedList}\n\n_Kill with: /kill ProjectName_`,
       { parse_mode: 'Markdown' }
     );
   } catch (error: any) {
@@ -543,6 +730,126 @@ app.get('/status', (req, res) => {
     enabled: ENABLED,
     message: ENABLED ? 'Notifications are ON' : 'Notifications are OFF (AFK mode)'
   });
+});
+
+// Project registry endpoints
+app.get('/projects', async (req, res) => {
+  try {
+    const projects = await loadProjects();
+    res.json({ projects, count: projects.length });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/projects/register', async (req, res) => {
+  const { name, path: projectPath, autoSpawn, description, tags } = req.body;
+
+  if (!name || !projectPath) {
+    return res.status(400).json({ error: 'name and path are required' });
+  }
+
+  try {
+    const isValid = await validateProjectPath(projectPath);
+    if (!isValid) {
+      return res.status(400).json({ error: 'Invalid path or not a directory' });
+    }
+
+    const project = await registerProject(name, projectPath, { autoSpawn, description, tags });
+    res.json({ success: true, project });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/projects/:name', async (req, res) => {
+  const { name } = req.params;
+
+  try {
+    const success = await unregisterProject(name);
+    if (success) {
+      res.json({ success: true, message: `Project ${name} unregistered` });
+    } else {
+      res.status(404).json({ error: 'Project not found' });
+    }
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/projects/:name', async (req, res) => {
+  const { name } = req.params;
+
+  try {
+    const project = await findProject(name);
+    if (project) {
+      res.json({ project });
+    } else {
+      res.status(404).json({ error: 'Project not found' });
+    }
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Claude spawner endpoints
+app.post('/spawn', async (req, res) => {
+  const { projectName, initialPrompt } = req.body;
+
+  if (!projectName) {
+    return res.status(400).json({ error: 'projectName is required' });
+  }
+
+  try {
+    const result = await spawnClaude(projectName, initialPrompt);
+    if (result.success) {
+      res.json(result);
+    } else {
+      res.status(400).json(result);
+    }
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/kill/:projectName', (req, res) => {
+  const { projectName } = req.params;
+
+  try {
+    const result = killClaude(projectName);
+    if (result.success) {
+      res.json(result);
+    } else {
+      res.status(404).json(result);
+    }
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.get('/spawned', (req, res) => {
+  try {
+    const spawned = listSpawnedProcesses();
+    res.json({ processes: spawned, count: spawned.length });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/spawned/:projectName', (req, res) => {
+  const { projectName } = req.params;
+
+  try {
+    const running = isClaudeRunning(projectName);
+    if (running) {
+      const spawned = listSpawnedProcesses().find(p => p.projectName === projectName);
+      res.json({ running: true, process: spawned });
+    } else {
+      res.json({ running: false });
+    }
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Start bot
