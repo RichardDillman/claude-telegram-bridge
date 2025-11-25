@@ -64,6 +64,9 @@ const pendingQuestions = new Map<string, {
   sessionId?: string;
 }>();
 
+// Track the last session that sent a message (for auto-routing replies)
+let lastMessageSession: string | null = null;
+
 // Clean up expired sessions periodically
 setInterval(() => {
   const now = Date.now();
@@ -302,7 +305,31 @@ bot.command('spawn', async (ctx) => {
   try {
     await ctx.reply(`⏳ Starting Claude in *${projectName}*...`, { parse_mode: 'Markdown' });
 
-    const result = await spawnClaude(projectName, initialPrompt);
+    // Create callback to send Claude output to Telegram
+    const outputCallback = async (data: string, isError: boolean) => {
+      console.log(`[CALLBACK] Received output for ${projectName}: ${data.substring(0, 100)}...`);
+
+      if (!chatId) {
+        console.error('[CALLBACK] No chatId available, cannot send to Telegram');
+        return;
+      }
+
+      try {
+        const emoji = isError ? '❌' : '🤖';
+        console.log(`[CALLBACK] Sending to Telegram chatId: ${chatId}`);
+        await bot.telegram.sendMessage(
+          chatId,
+          `📁 *${projectName}*\n${emoji} ${data}`,
+          { parse_mode: 'Markdown' }
+        );
+        console.log(`[CALLBACK] Successfully sent to Telegram`);
+      } catch (error) {
+        console.error('[CALLBACK] Failed to send Claude output to Telegram:', error);
+      }
+    };
+
+    console.log(`[SPAWN] Creating callback for ${projectName}, chatId: ${chatId}`);
+    const result = await spawnClaude(projectName, initialPrompt, outputCallback);
 
     if (result.success) {
       await ctx.reply(
@@ -403,36 +430,120 @@ bot.on('text', async (ctx) => {
       });
       await ctx.reply(`💬 Message sent to active session: *${activeSession.projectName}*`, { parse_mode: 'Markdown' });
     } else {
-      // Queue for when project becomes active
+      // No active session - check if project is registered and should auto-spawn
       try {
-        await enqueueTask({
-          projectName: targetProject,
-          projectPath: '/unknown',
-          message: actualMessage,
-          from,
-          priority: 'normal',
-          timestamp: new Date()
-        });
-        await ctx.reply(`📥 Message queued for *${targetProject}* (offline)\n\nIt will be delivered when Claude starts in that project.`, { parse_mode: 'Markdown' });
+        const project = await findProject(targetProject);
+
+        if (project && project.autoSpawn) {
+          // Auto-spawn Claude for this project
+          await ctx.reply(`⏳ Auto-spawning Claude for *${project.name}*...`, { parse_mode: 'Markdown' });
+
+          // Create callback to send Claude output to Telegram
+          const outputCallback = async (data: string, isError: boolean) => {
+            console.log(`[AUTO-SPAWN CALLBACK] Received output for ${project.name}: ${data.substring(0, 100)}...`);
+
+            if (!chatId) {
+              console.error('[AUTO-SPAWN CALLBACK] No chatId available, cannot send to Telegram');
+              return;
+            }
+
+            try {
+              const emoji = isError ? '❌' : '🤖';
+              console.log(`[AUTO-SPAWN CALLBACK] Sending to Telegram chatId: ${chatId}`);
+              await bot.telegram.sendMessage(
+                chatId,
+                `📁 *${project.name}*\n${emoji} ${data}`,
+                { parse_mode: 'Markdown' }
+              );
+              console.log(`[AUTO-SPAWN CALLBACK] Successfully sent to Telegram`);
+            } catch (error) {
+              console.error('[AUTO-SPAWN CALLBACK] Failed to send Claude output to Telegram:', error);
+            }
+          };
+
+          console.log(`[AUTO-SPAWN] Creating callback for ${project.name}, chatId: ${chatId}`);
+          const result = await spawnClaude(project.name, actualMessage, outputCallback);
+
+          if (result.success) {
+            await ctx.reply(
+              `✅ Claude started for *${project.name}*\n\n` +
+              `PID: ${result.pid}\n` +
+              `💬 Your message was passed as the initial prompt.`,
+              { parse_mode: 'Markdown' }
+            );
+          } else {
+            // Spawn failed - queue the message instead
+            await enqueueTask({
+              projectName: targetProject,
+              projectPath: project.path,
+              message: actualMessage,
+              from,
+              priority: 'normal',
+              timestamp: new Date()
+            });
+            await ctx.reply(`❌ Auto-spawn failed: ${result.message}\n\n📥 Message queued instead.`, { parse_mode: 'Markdown' });
+          }
+        } else if (project) {
+          // Project exists but auto-spawn disabled - just queue
+          await enqueueTask({
+            projectName: targetProject,
+            projectPath: project.path,
+            message: actualMessage,
+            from,
+            priority: 'normal',
+            timestamp: new Date()
+          });
+          await ctx.reply(
+            `📥 Message queued for *${project.name}* (offline)\n\n` +
+            `Auto-spawn is disabled. Start manually with: \`/spawn ${project.name}\``,
+            { parse_mode: 'Markdown' }
+          );
+        } else {
+          // Project not registered
+          await enqueueTask({
+            projectName: targetProject,
+            projectPath: '/unknown',
+            message: actualMessage,
+            from,
+            priority: 'normal',
+            timestamp: new Date()
+          });
+          await ctx.reply(
+            `📥 Message queued for *${targetProject}* (not registered)\n\n` +
+            `Register with: \`/register ${targetProject} /path/to/project --auto-spawn\``,
+            { parse_mode: 'Markdown' }
+          );
+        }
       } catch (error: any) {
-        await ctx.reply(`❌ Failed to queue message: ${error.message}`);
+        await ctx.reply(`❌ Failed to process message: ${error.message}`);
       }
     }
     return;
   }
 
-  // No project specified - add to general message queue
-  messageQueue.push({
-    from,
-    message,
-    timestamp: new Date(),
-    read: false
-  });
-
-  // Acknowledge receipt - Claude will respond when available
-  await ctx.reply('💬 Message received - responding...');
-
-  console.log('📥 Queued for Claude to process');
+  // No project specified - check if we should auto-route to last session
+  if (lastMessageSession && activeSessions.has(lastMessageSession)) {
+    const session = activeSessions.get(lastMessageSession)!;
+    messageQueue.push({
+      from,
+      message,
+      timestamp: new Date(),
+      read: false,
+      sessionId: lastMessageSession
+    });
+    await ctx.reply(`💬 Auto-routed to: 📁 *${session.projectName}* [#${lastMessageSession.substring(0, 7)}]`, { parse_mode: 'Markdown' });
+    console.log(`📥 Auto-routed to ${session.projectName}`);
+  } else {
+    // No recent session - add to general message queue
+    messageQueue.push({
+      from,
+      message,
+      timestamp: new Date(),
+      read: false
+    });
+    await ctx.reply('💬 Message received - responding...');
+    console.log('📥 Queued for Claude to process');
+  }
 });
 
 // Register or update a Claude session
@@ -595,6 +706,8 @@ app.post('/notify', async (req, res) => {
         session.lastActivity = new Date();
         const shortId = sessionId.substring(0, 7);
         projectContext = `📁 *${session.projectName}* [#${shortId}]\n`;
+        // Track this as the last session that sent a message
+        lastMessageSession = sessionId;
       }
     }
 
@@ -801,7 +914,26 @@ app.post('/spawn', async (req, res) => {
   }
 
   try {
-    const result = await spawnClaude(projectName, initialPrompt);
+    // Create callback to send Claude output to Telegram
+    const outputCallback = chatId ? async (data: string, isError: boolean) => {
+      console.log(`[HTTP CALLBACK] Received output for ${projectName}: ${data.substring(0, 100)}...`);
+
+      try {
+        const emoji = isError ? '❌' : '🤖';
+        console.log(`[HTTP CALLBACK] Sending to Telegram chatId: ${chatId}`);
+        await bot.telegram.sendMessage(
+          chatId!,
+          `📁 *${projectName}*\n${emoji} ${data}`,
+          { parse_mode: 'Markdown' }
+        );
+        console.log(`[HTTP CALLBACK] Successfully sent to Telegram`);
+      } catch (error) {
+        console.error('[HTTP CALLBACK] Failed to send Claude output to Telegram:', error);
+      }
+    } : undefined;
+
+    console.log(`[HTTP /spawn] Creating callback for ${projectName}, chatId: ${chatId}, hasCallback: ${!!outputCallback}`);
+    const result = await spawnClaude(projectName, initialPrompt, outputCallback);
     if (result.success) {
       res.json(result);
     } else {

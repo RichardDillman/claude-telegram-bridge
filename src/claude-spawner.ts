@@ -9,6 +9,7 @@ interface SpawnedProcess {
   process: ChildProcess;
   startTime: Date;
   initialPrompt?: string;
+  onOutput?: (data: string, isError: boolean) => void;
 }
 
 const activeProcesses = new Map<string, SpawnedProcess>();
@@ -16,7 +17,8 @@ const activeProcesses = new Map<string, SpawnedProcess>();
 // Spawn Claude in a project
 export async function spawnClaude(
   projectName: string,
-  initialPrompt?: string
+  initialPrompt?: string,
+  onOutput?: (data: string, isError: boolean) => void
 ): Promise<{ success: boolean; message: string; pid?: number }> {
   // Check if already running
   if (activeProcesses.has(projectName)) {
@@ -52,22 +54,47 @@ export async function spawnClaude(
       projectName,
       process: claudeProcess,
       startTime: new Date(),
-      initialPrompt
+      initialPrompt,
+      onOutput
     });
 
     // Update last accessed
     await touchProject(projectName);
 
-    // Log output (for debugging)
+    // Handle output - log and optionally send to callback
     if (claudeProcess.stdout) {
       claudeProcess.stdout.on('data', (data) => {
-        console.log(`[${projectName}] ${data.toString().trim()}`);
+        const output = data.toString().trim();
+        console.log(`[${projectName}] ${output}`);
+
+        // Send to callback if provided
+        if (onOutput) {
+          console.log(`[DEBUG] Invoking onOutput callback for stdout in ${projectName}`);
+          try {
+            onOutput(output, false);
+          } catch (error) {
+            console.error(`[ERROR] onOutput callback failed for ${projectName}:`, error);
+          }
+        } else {
+          console.warn(`[WARN] No onOutput callback provided for ${projectName}`);
+        }
       });
     }
 
     if (claudeProcess.stderr) {
       claudeProcess.stderr.on('data', (data) => {
-        console.error(`[${projectName}] ${data.toString().trim()}`);
+        const output = data.toString().trim();
+        console.error(`[${projectName}] ${output}`);
+
+        // Send errors to callback if provided
+        if (onOutput) {
+          console.log(`[DEBUG] Invoking onOutput callback for stderr in ${projectName}`);
+          try {
+            onOutput(output, true);
+          } catch (error) {
+            console.error(`[ERROR] onOutput callback failed for ${projectName}:`, error);
+          }
+        }
       });
     }
 
