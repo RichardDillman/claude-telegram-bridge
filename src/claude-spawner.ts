@@ -78,7 +78,9 @@ export async function spawnClaude(
     const projectEnv = loadEnvFile(project.path);
 
     // Spawn Claude Code
-    const claudeProcess = spawn('claude', initialPrompt ? [initialPrompt] : [], {
+    // Use -p flag to pass prompt, otherwise Claude expects stdin
+    const args = initialPrompt ? ['-p', initialPrompt] : [];
+    const claudeProcess = spawn('claude', args, {
       cwd: project.path,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
